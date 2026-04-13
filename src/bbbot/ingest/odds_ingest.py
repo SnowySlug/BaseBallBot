@@ -170,3 +170,60 @@ def get_best_odds_for_game(session: Session, game_id: int) -> dict:
                 result["under_book"] = snap.sportsbook
 
     return result
+
+
+def get_kalshi_odds_for_game(session: Session, game_id: int) -> dict:
+    """Get Kalshi odds for a game, falling back to best available.
+
+    Prioritizes Kalshi, then falls back to DraftKings/FanDuel, then best available.
+    """
+    preferred_books = ["kalshi", "draftkings", "fanduel"]
+
+    result = {
+        "home_ml": None, "home_ml_book": None,
+        "away_ml": None, "away_ml_book": None,
+        "total_line": None,
+        "over_odds": None, "over_book": None,
+        "under_odds": None, "under_book": None,
+    }
+
+    h2h_snaps = session.query(OddsSnapshot).filter(
+        OddsSnapshot.game_id == game_id,
+        OddsSnapshot.market_type == "h2h",
+    ).order_by(OddsSnapshot.captured_at.desc()).all()
+
+    # Try preferred books in order, then fall back to any
+    for target_book in preferred_books + [None]:
+        for snap in h2h_snaps:
+            if target_book and snap.sportsbook != target_book:
+                continue
+            if snap.home_line is not None and result["home_ml"] is None:
+                result["home_ml"] = snap.home_line
+                result["home_ml_book"] = snap.sportsbook
+            if snap.away_line is not None and result["away_ml"] is None:
+                result["away_ml"] = snap.away_line
+                result["away_ml_book"] = snap.sportsbook
+        if result["home_ml"] is not None:
+            break
+
+    total_snaps = session.query(OddsSnapshot).filter(
+        OddsSnapshot.game_id == game_id,
+        OddsSnapshot.market_type == "totals",
+    ).order_by(OddsSnapshot.captured_at.desc()).all()
+
+    for target_book in preferred_books + [None]:
+        for snap in total_snaps:
+            if target_book and snap.sportsbook != target_book:
+                continue
+            if snap.total_line is not None and result["total_line"] is None:
+                result["total_line"] = snap.total_line
+            if snap.over_odds is not None and result["over_odds"] is None:
+                result["over_odds"] = snap.over_odds
+                result["over_book"] = snap.sportsbook
+            if snap.under_odds is not None and result["under_odds"] is None:
+                result["under_odds"] = snap.under_odds
+                result["under_book"] = snap.sportsbook
+        if result["total_line"] is not None:
+            break
+
+    return result

@@ -28,6 +28,9 @@ class OddsAPIClient(BaseClient):
     def configured(self) -> bool:
         return bool(self.api_key)
 
+    # Bookmakers to explicitly request (Kalshi isn't in default US region)
+    BOOKMAKERS = "kalshi,draftkings,fanduel,betmgm,betrivers,bovada,betonlineag,lowvig,mybookieag,betus"
+
     def get_mlb_odds(self) -> list[dict]:
         """Fetch current MLB odds from all configured sportsbooks.
 
@@ -44,6 +47,7 @@ class OddsAPIClient(BaseClient):
             "regions": self.regions,
             "markets": self.markets,
             "oddsFormat": "american",
+            "bookmakers": self.BOOKMAKERS,
         })
 
         if isinstance(data, list):

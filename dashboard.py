@@ -31,7 +31,7 @@ from bbbot.db.models import (
 from bbbot.betting.odds_math import american_to_decimal, calculate_ev
 from bbbot.betting.kelly import fractional_kelly, kelly_to_units
 from bbbot.features.builder import build_game_features, create_default_registry
-from bbbot.ingest.odds_ingest import get_best_odds_for_game
+from bbbot.ingest.odds_ingest import get_best_odds_for_game, get_kalshi_odds_for_game
 
 # ---------------------------------------------------------------------------
 # Team colors for charts and cards
@@ -222,8 +222,8 @@ if page == "Today's Predictions":
     # Header
     st.markdown(
         "<div class='header-gradient'>"
-        "<h1 style='margin:0; color:white;'>Today's Predictions</h1>"
-        "<p style='margin:4px 0 0 0; color:#90caf9;'>ML-powered game forecasts with real sportsbook odds</p>"
+        "<h1 style='margin:0; color:white;'>Today's Picks</h1>"
+        "<p style='margin:4px 0 0 0; color:#90caf9;'>Model predictions with Kalshi odds</p>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -265,7 +265,7 @@ if page == "Today's Predictions":
             if using_trained:
                 st.success("Using trained XGBoost/LightGBM ensemble")
             else:
-                st.info("Using baseline model. Run `bbbot train all` for better predictions.")
+                st.info("Using baseline model — run `bbbot train all` for better predictions.")
 
             registry = create_default_registry()
             predictions = []
@@ -283,38 +283,45 @@ if page == "Today's Predictions":
                     away_runs = float(run_preds[1])
                     total = home_runs + away_runs
 
-                    odds_info = get_best_odds_for_game(session, game.id)
+                    # Model's winner pick
+                    if home_win_prob >= 0.5:
+                        pick_team = game.home_team.abbreviation
+                        pick_prob = home_win_prob
+                        pick_side = "home"
+                    else:
+                        pick_team = game.away_team.abbreviation
+                        pick_prob = away_win_prob
+                        pick_side = "away"
 
-                    # Build candidates
-                    candidates = []
+                    # Confidence level based on probability edge
+                    edge = abs(home_win_prob - 0.5)
+                    if edge >= 0.15:
+                        confidence = "HIGH"
+                        conf_color = "#00e676"
+                    elif edge >= 0.08:
+                        confidence = "MEDIUM"
+                        conf_color = "#ffd600"
+                    else:
+                        confidence = "LOW"
+                        conf_color = "#ff9100"
 
-                    # Home ML
-                    home_odds_am = odds_info.get("home_ml") or (-150 if home_win_prob > 0.5 else 130)
-                    home_dec = american_to_decimal(home_odds_am)
-                    home_ev = calculate_ev(home_win_prob, home_dec)
-                    if home_ev > 0:
-                        kf = fractional_kelly(home_win_prob, home_dec, kelly_frac)
-                        units = kelly_to_units(kf, bankroll, 100)
-                        book = odds_info.get("home_ml_book", "")
-                        candidates.append({
-                            "label": f"{game.home_team.abbreviation} ML",
-                            "ev": home_ev, "units": units, "odds": home_odds_am, "book": book,
-                        })
+                    # Get Kalshi-first odds
+                    odds_info = get_kalshi_odds_for_game(session, game.id)
 
-                    # Away ML
-                    away_odds_am = odds_info.get("away_ml") or (130 if home_win_prob > 0.5 else -150)
-                    away_dec = american_to_decimal(away_odds_am)
-                    away_ev = calculate_ev(away_win_prob, away_dec)
-                    if away_ev > 0:
-                        kf = fractional_kelly(away_win_prob, away_dec, kelly_frac)
-                        units = kelly_to_units(kf, bankroll, 100)
-                        book = odds_info.get("away_ml_book", "")
-                        candidates.append({
-                            "label": f"{game.away_team.abbreviation} ML",
-                            "ev": away_ev, "units": units, "odds": away_odds_am, "book": book,
-                        })
+                    # Compute EV against Kalshi odds
+                    pick_odds_am = odds_info.get("home_ml") if pick_side == "home" else odds_info.get("away_ml")
+                    pick_book = odds_info.get("home_ml_book") if pick_side == "home" else odds_info.get("away_ml_book")
 
-                    # Over/Under
+                    pick_ev = None
+                    pick_units = 0.0
+                    if pick_odds_am is not None:
+                        pick_dec = american_to_decimal(pick_odds_am)
+                        pick_ev = calculate_ev(pick_prob, pick_dec)
+                        if pick_ev > 0:
+                            kf = fractional_kelly(pick_prob, pick_dec, kelly_frac)
+                            pick_units = kelly_to_units(kf, bankroll, 100)
+
+                    # O/U analysis
                     real_total_line = odds_info.get("total_line") or 8.5
                     over_odds_am = odds_info.get("over_odds") or -110
                     under_odds_am = odds_info.get("under_odds") or -110
@@ -327,36 +334,27 @@ if page == "Today's Predictions":
                         over_probs = np.array([0.5])
                         under_probs = np.array([0.5])
 
-                    over_dec = american_to_decimal(over_odds_am)
-                    over_ev = calculate_ev(float(over_probs[0]), over_dec)
-                    if over_ev > 0:
-                        kf = fractional_kelly(float(over_probs[0]), over_dec, kelly_frac)
-                        units = kelly_to_units(kf, bankroll, 100)
-                        book = odds_info.get("over_book", "")
-                        candidates.append({
-                            "label": f"Over {real_total_line}",
-                            "ev": over_ev, "units": units, "odds": over_odds_am, "book": book,
-                        })
+                    ou_pick = "Over" if float(over_probs[0]) > 0.5 else "Under"
+                    ou_prob = float(over_probs[0]) if ou_pick == "Over" else float(under_probs[0])
+                    ou_odds_am = over_odds_am if ou_pick == "Over" else under_odds_am
+                    ou_book = odds_info.get("over_book", "") if ou_pick == "Over" else odds_info.get("under_book", "")
 
-                    under_dec = american_to_decimal(under_odds_am)
-                    under_ev = calculate_ev(float(under_probs[0]), under_dec)
-                    if under_ev > 0:
-                        kf = fractional_kelly(float(under_probs[0]), under_dec, kelly_frac)
-                        units = kelly_to_units(kf, bankroll, 100)
-                        book = odds_info.get("under_book", "")
-                        candidates.append({
-                            "label": f"Under {real_total_line}",
-                            "ev": under_ev, "units": units, "odds": under_odds_am, "book": book,
-                        })
+                    ou_ev = None
+                    ou_units = 0.0
+                    if ou_odds_am is not None:
+                        ou_dec = american_to_decimal(ou_odds_am)
+                        ou_ev = calculate_ev(ou_prob, ou_dec)
+                        if ou_ev > 0:
+                            kf = fractional_kelly(ou_prob, ou_dec, kelly_frac)
+                            ou_units = kelly_to_units(kf, bankroll, 100)
 
-                    candidates.sort(key=lambda x: x["ev"], reverse=True)
-                    best = candidates[0] if candidates else None
-
-                    if best and best["ev"] >= 0.05:
+                    # Tier based on best EV
+                    best_ev = max(pick_ev or 0, ou_ev or 0)
+                    if best_ev >= 0.05:
                         tier = "A"
-                    elif best and best["ev"] >= 0.03:
+                    elif best_ev >= 0.03:
                         tier = "B"
-                    elif best and best["ev"] > 0:
+                    elif best_ev > 0:
                         tier = "C"
                     else:
                         tier = "D"
@@ -368,46 +366,60 @@ if page == "Today's Predictions":
                         "home_runs": home_runs,
                         "away_runs": away_runs,
                         "total": total,
+                        "pick_team": pick_team,
+                        "pick_prob": pick_prob,
+                        "pick_side": pick_side,
+                        "confidence": confidence,
+                        "conf_color": conf_color,
+                        "pick_odds_am": pick_odds_am,
+                        "pick_book": pick_book or "",
+                        "pick_ev": pick_ev,
+                        "pick_units": pick_units,
+                        "ou_pick": ou_pick,
+                        "ou_prob": ou_prob,
+                        "ou_line": real_total_line,
+                        "ou_odds_am": ou_odds_am,
+                        "ou_book": ou_book,
+                        "ou_ev": ou_ev,
+                        "ou_units": ou_units,
                         "over_prob": float(over_probs[0]),
                         "under_prob": float(under_probs[0]),
                         "tier": tier,
-                        "best": best,
-                        "candidates": candidates,
+                        "best_ev": best_ev,
                         "odds_info": odds_info,
-                        "total_line": real_total_line,
                     })
                 except Exception as e:
                     st.warning(f"Error predicting {game.away_team.abbreviation} @ {game.home_team.abbreviation}: {e}")
                     continue
 
-            # Sort by tier
+            # Sort: highest confidence first, then by EV
             tier_order = {"A": 0, "B": 1, "C": 2, "D": 3}
-            predictions.sort(key=lambda p: (tier_order[p["tier"]], -(p["best"]["ev"] if p["best"] else 0)))
+            predictions.sort(key=lambda p: (tier_order[p["tier"]], -p["best_ev"]))
 
             # Summary metrics
-            total_picks = sum(1 for p in predictions if p["best"])
+            total_bets = sum(1 for p in predictions if (p["pick_ev"] or 0) > 0 or (p["ou_ev"] or 0) > 0)
             a_picks = sum(1 for p in predictions if p["tier"] == "A")
-            avg_ev = np.mean([p["best"]["ev"] for p in predictions if p["best"]]) if total_picks else 0
+            positive_ev = [p for p in predictions if (p["pick_ev"] or 0) > 0]
+            avg_ev = np.mean([p["pick_ev"] for p in positive_ev]) if positive_ev else 0
 
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Games", len(predictions))
-            m2.metric("Actionable Picks", total_picks)
-            m3.metric("A-Tier Picks", a_picks)
-            m4.metric("Avg EV", f"{avg_ev:+.1%}")
+            m2.metric("+EV Bets", total_bets)
+            m3.metric("High Confidence", sum(1 for p in predictions if p["confidence"] == "HIGH"))
+            m4.metric("Avg Pick EV", f"{avg_ev:+.1%}" if avg_ev else "N/A")
 
             st.divider()
 
-            # Render game cards
+            # ---- Render game cards ----
             for pred in predictions:
                 game = pred["game"]
                 away = game.away_team.abbreviation
                 home = game.home_team.abbreviation
                 away_color = TEAM_COLORS.get(away, "#666")
                 home_color = TEAM_COLORS.get(home, "#666")
+                pick_color = TEAM_COLORS.get(pred["pick_team"], "#00e676")
 
                 time_str = game.game_time_utc.strftime("%I:%M %p UTC") if game.game_time_utc else "TBD"
-
-                # Status badge
                 status_map = {
                     "final": ("FINAL", "#4caf50"),
                     "live": ("LIVE", "#f44336"),
@@ -416,109 +428,121 @@ if page == "Today's Predictions":
                 }
                 status_text, status_color = status_map.get(game.status, (game.status, "#666"))
 
-                with st.container():
-                    st.markdown(f"""
-                    <div class="game-card">
-                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                # Score display for final games
+                score_html = ""
+                result_html = ""
+                if game.status == "final" and game.away_score is not None:
+                    score_html = (
+                        f"<span style='color:#8892a4; font-size:14px; margin-left:12px;'>"
+                        f"Final: {game.away_score} - {game.home_score}</span>"
+                    )
+                    # Check if model was right
+                    actual_winner = home if game.home_score > game.away_score else away
+                    if actual_winner == pred["pick_team"]:
+                        result_html = "<span style='color:#00e676; font-weight:700; margin-left:8px;'>CORRECT</span>"
+                    else:
+                        result_html = "<span style='color:#ff5252; font-weight:700; margin-left:8px;'>WRONG</span>"
+
+                # Odds display
+                pick_odds_str = ""
+                if pred["pick_odds_am"] is not None:
+                    o = pred["pick_odds_am"]
+                    pick_odds_str = f"+{o:.0f}" if o > 0 else f"{o:.0f}"
+
+                ev_html = ""
+                if pred["pick_ev"] is not None and pred["pick_ev"] > 0:
+                    ev_html = (
+                        f"<span style='color:#00e676; font-size:13px;'>"
+                        f"EV: {pred['pick_ev']:+.1%} | {pred['pick_units']:.1f}u</span>"
+                    )
+                elif pred["pick_ev"] is not None:
+                    ev_html = f"<span style='color:#ff9100; font-size:13px;'>EV: {pred['pick_ev']:+.1%} (no bet)</span>"
+
+                # O/U display
+                ou_odds_str = ""
+                if pred["ou_odds_am"] is not None:
+                    o = pred["ou_odds_am"]
+                    ou_odds_str = f"+{o:.0f}" if o > 0 else f"{o:.0f}"
+
+                ou_ev_html = ""
+                if pred["ou_ev"] is not None and pred["ou_ev"] > 0:
+                    ou_ev_html = (
+                        f"<span style='color:#00e676; font-size:13px;'>"
+                        f"EV: {pred['ou_ev']:+.1%} | {pred['ou_units']:.1f}u</span>"
+                    )
+
+                book_tag = f" @ {pred['pick_book']}" if pred["pick_book"] else ""
+                ou_book_tag = f" @ {pred['ou_book']}" if pred["ou_book"] else ""
+
+                away_sp = game.away_sp.name if game.away_sp else "TBD"
+                home_sp = game.home_sp.name if game.home_sp else "TBD"
+
+                st.markdown(f"""
+                <div class="game-card">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+                        <div>
+                            <span style="color:{away_color}; font-size:24px; font-weight:700;">{away}</span>
+                            <span class="matchup-vs" style="margin:0 10px;">@</span>
+                            <span style="color:{home_color}; font-size:24px; font-weight:700;">{home}</span>
+                            {score_html}{result_html}
+                        </div>
+                        <div style="text-align:right;">
                             <span class="tier-badge tier-{pred['tier']}">TIER {pred['tier']}</span>
-                            <span style="color:{status_color}; font-weight:600; font-size:13px;">{status_text}</span>
+                            <span style="color:{status_color}; font-weight:600; font-size:13px; margin-left:12px;">{status_text}</span>
                         </div>
                     </div>
-                    """, unsafe_allow_html=True)
 
-                    c1, c2, c3, c4 = st.columns([3, 2, 2, 3])
+                    <div style="color:#8892a4; font-size:13px; margin-bottom:16px;">
+                        {away_sp} vs {home_sp}
+                    </div>
 
-                    with c1:
-                        # Matchup
-                        score_str = ""
-                        if game.status == "final" and game.away_score is not None:
-                            score_str = f"  ({game.away_score} - {game.home_score})"
-                        st.markdown(
-                            f"<span style='color:{away_color}; font-size:22px; font-weight:700;'>{away}</span>"
-                            f"  <span class='matchup-vs'>@</span>  "
-                            f"<span style='color:{home_color}; font-size:22px; font-weight:700;'>{home}</span>"
-                            f"<span style='color:#8892a4; font-size:14px;'>{score_str}</span>",
-                            unsafe_allow_html=True,
-                        )
-                        away_sp = game.away_sp.name if game.away_sp else "TBD"
-                        home_sp = game.home_sp.name if game.home_sp else "TBD"
-                        st.caption(f"{away_sp}  vs  {home_sp}")
+                    <div style="display:flex; gap:20px; flex-wrap:wrap;">
+                        <!-- MODEL PICK -->
+                        <div style="flex:1; min-width:220px; background:#0d1520; border:2px solid {pick_color}; border-radius:10px; padding:16px;">
+                            <div style="font-size:11px; color:#8892a4; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Model Pick</div>
+                            <div style="font-size:28px; font-weight:800; color:{pick_color};">{pred['pick_team']} WINS</div>
+                            <div style="font-size:15px; color:#e0e0e0; margin-top:4px;">
+                                {pred['pick_prob']:.0%} probability
+                                <span style="color:{pred['conf_color']}; font-weight:700; margin-left:8px;">{pred['confidence']}</span>
+                            </div>
+                            <div style="margin-top:8px; font-size:13px; color:#b0bec5;">
+                                {pick_odds_str}{book_tag}
+                            </div>
+                            <div style="margin-top:4px;">{ev_html}</div>
+                        </div>
 
-                    with c2:
-                        # Win probabilities
-                        st.markdown(
-                            f"<div class='stat-box'>"
-                            f"<div class='stat-value'>{pred['away_win_prob']:.0%} - {pred['home_win_prob']:.0%}</div>"
-                            f"<div class='stat-label'>Win Probability</div>"
-                            f"</div>",
-                            unsafe_allow_html=True,
-                        )
+                        <!-- PREDICTED SCORE -->
+                        <div style="flex:0.6; min-width:160px; background:#0d1520; border:1px solid #2d3548; border-radius:10px; padding:16px; text-align:center;">
+                            <div style="font-size:11px; color:#8892a4; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Predicted Score</div>
+                            <div style="font-size:28px; font-weight:700; color:#e0e0e0;">
+                                <span style="color:{away_color};">{pred['away_runs']:.1f}</span>
+                                <span style="color:#5c6878;"> - </span>
+                                <span style="color:{home_color};">{pred['home_runs']:.1f}</span>
+                            </div>
+                            <div style="font-size:13px; color:#8892a4; margin-top:4px;">Total: {pred['total']:.1f}</div>
+                        </div>
 
-                    with c3:
-                        # Predicted score
-                        st.markdown(
-                            f"<div class='stat-box'>"
-                            f"<div class='stat-value'>{pred['away_runs']:.1f} - {pred['home_runs']:.1f}</div>"
-                            f"<div class='stat-label'>Predicted Score</div>"
-                            f"</div>",
-                            unsafe_allow_html=True,
-                        )
+                        <!-- O/U PICK -->
+                        <div style="flex:0.8; min-width:180px; background:#0d1520; border:1px solid #2d3548; border-radius:10px; padding:16px;">
+                            <div style="font-size:11px; color:#8892a4; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Over/Under</div>
+                            <div style="font-size:22px; font-weight:700; color:#e0e0e0;">
+                                {pred['ou_pick']} {pred['ou_line']}
+                            </div>
+                            <div style="font-size:13px; color:#b0bec5; margin-top:4px;">
+                                {pred['ou_prob']:.0%} prob | {ou_odds_str}{ou_book_tag}
+                            </div>
+                            <div style="margin-top:4px;">{ou_ev_html}</div>
+                        </div>
 
-                    with c4:
-                        # Best bet
-                        if pred["best"]:
-                            b = pred["best"]
-                            ev_class = "positive-ev" if b["ev"] > 0 else "negative-ev"
-                            odds_str = f"+{b['odds']:.0f}" if b["odds"] > 0 else f"{b['odds']:.0f}"
-                            book_str = f" @ {b['book']}" if b["book"] else ""
-                            st.markdown(
-                                f"<div class='bet-rec'>"
-                                f"<div style='font-weight:700; font-size:16px; color:#e0e0e0;'>{b['label']}</div>"
-                                f"<div style='font-size:13px; color:#a5d6a7;'>"
-                                f"EV: <span class='{ev_class}'>{b['ev']:+.1%}</span> | "
-                                f"{odds_str}{book_str} | {b['units']:.1f}u</div>"
-                                f"</div>",
-                                unsafe_allow_html=True,
-                            )
-                        else:
-                            st.markdown(
-                                "<div class='stat-box'>"
-                                "<div style='color:#616161;'>No +EV bet found</div>"
-                                "</div>",
-                                unsafe_allow_html=True,
-                            )
-
-                    # Expandable details
-                    with st.expander("Details"):
-                        d1, d2 = st.columns(2)
-                        with d1:
-                            st.markdown("**All +EV Opportunities:**")
-                            if pred["candidates"]:
-                                for c in pred["candidates"]:
-                                    odds_s = f"+{c['odds']:.0f}" if c["odds"] > 0 else f"{c['odds']:.0f}"
-                                    book_s = f" ({c['book']})" if c["book"] else ""
-                                    st.markdown(
-                                        f"- **{c['label']}** {odds_s}{book_s} — "
-                                        f"EV: {c['ev']:+.1%}, {c['units']:.1f}u"
-                                    )
-                            else:
-                                st.markdown("*No positive EV bets found*")
-
-                        with d2:
-                            st.markdown("**O/U Analysis:**")
-                            st.markdown(f"- Line: **{pred['total_line']}**")
-                            st.markdown(f"- Predicted Total: **{pred['total']:.1f}**")
-                            st.markdown(f"- Over Prob: **{pred['over_prob']:.0%}**")
-                            st.markdown(f"- Under Prob: **{pred['under_prob']:.0%}**")
-
-                            if pred["odds_info"].get("home_ml"):
-                                st.markdown("**Market Odds:**")
-                                hml = pred["odds_info"]["home_ml"]
-                                aml = pred["odds_info"]["away_ml"]
-                                hml_s = f"+{hml:.0f}" if hml > 0 else f"{hml:.0f}"
-                                aml_s = f"+{aml:.0f}" if aml > 0 else f"{aml:.0f}"
-                                st.markdown(f"- {home} ML: {hml_s} ({pred['odds_info'].get('home_ml_book', '')})")
-                                st.markdown(f"- {away} ML: {aml_s} ({pred['odds_info'].get('away_ml_book', '')})")
+                        <!-- WIN PROBS -->
+                        <div style="flex:0.6; min-width:160px; background:#0d1520; border:1px solid #2d3548; border-radius:10px; padding:16px; text-align:center;">
+                            <div style="font-size:11px; color:#8892a4; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Win Probability</div>
+                            <div style="font-size:16px; color:{away_color}; font-weight:600;">{away} {pred['away_win_prob']:.0%}</div>
+                            <div style="font-size:16px; color:{home_color}; font-weight:600;">{home} {pred['home_win_prob']:.0%}</div>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
 
     finally:
         session.close()
