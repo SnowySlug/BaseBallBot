@@ -1,5 +1,6 @@
 """BBBot MLB Prediction Dashboard — Streamlit app."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -12,6 +13,15 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from datetime import date, datetime, timedelta
+
+# ---------------------------------------------------------------------------
+# Load Streamlit Cloud secrets into env vars (so pydantic-settings picks them up)
+# ---------------------------------------------------------------------------
+try:
+    for key in st.secrets:
+        os.environ.setdefault(key, str(st.secrets[key]))
+except Exception:
+    pass  # No secrets configured
 
 from bbbot.db.engine import get_session, init_db
 from bbbot.db.models import (
@@ -140,7 +150,7 @@ st.markdown("""
 
 
 # ---------------------------------------------------------------------------
-# Session init
+# Session init — auto-seed and auto-ingest on first load
 # ---------------------------------------------------------------------------
 @st.cache_resource
 def get_db():
@@ -148,6 +158,35 @@ def get_db():
     return True
 
 get_db()
+
+
+@st.cache_data(ttl=600, show_spinner="Loading MLB data...")
+def ensure_data(game_date: date):
+    """Seed teams/parks and ingest schedule + odds if DB is empty."""
+    session = get_session()
+    try:
+        team_count = session.query(Team).count()
+        if team_count == 0:
+            from bbbot.db.seed import seed_teams_and_parks
+            seed_teams_and_parks()
+
+        game_count = session.query(Game).filter(Game.game_date == game_date).count()
+        if game_count == 0:
+            from bbbot.ingest.schedule import DailyIngestor
+            ingestor = DailyIngestor()
+            ingestor.ingest_schedule(game_date)
+
+        odds_count = session.query(OddsSnapshot).join(Game).filter(
+            Game.game_date == game_date
+        ).count()
+        if odds_count == 0:
+            try:
+                from bbbot.ingest.odds_ingest import ingest_odds
+                ingest_odds()
+            except Exception:
+                pass  # Odds API key may not be configured
+    finally:
+        session.close()
 
 
 def get_sess():
@@ -198,6 +237,9 @@ if page == "Today's Predictions":
         kelly_frac = st.selectbox("Kelly Fraction", [0.125, 0.25, 0.5, 1.0], index=1,
                                   format_func=lambda x: f"{x:.0%} Kelly")
 
+    # Auto-fetch data for selected date
+    ensure_data(game_date)
+
     session = get_sess()
     try:
         games = session.query(Game).filter(
@@ -205,7 +247,7 @@ if page == "Today's Predictions":
         ).order_by(Game.game_time_utc).all()
 
         if not games:
-            st.warning(f"No games found for {game_date}. Run `bbbot ingest daily --date {game_date}` first.")
+            st.warning(f"No games found for {game_date}. There may be no MLB games scheduled.")
         else:
             # Load models
             from bbbot.models.training import load_trained_model
