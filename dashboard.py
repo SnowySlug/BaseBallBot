@@ -167,8 +167,8 @@ def ensure_data(game_date: date):
     try:
         team_count = session.query(Team).count()
         if team_count == 0:
-            from bbbot.db.seed import seed_teams_and_parks
-            seed_teams_and_parks()
+            from bbbot.db.seed import seed_all
+            seed_all(session)
 
         game_count = session.query(Game).filter(Game.game_date == game_date).count()
         if game_count == 0:
