@@ -415,134 +415,69 @@ if page == "Today's Predictions":
                 game = pred["game"]
                 away = game.away_team.abbreviation
                 home = game.home_team.abbreviation
-                away_color = TEAM_COLORS.get(away, "#666")
-                home_color = TEAM_COLORS.get(home, "#666")
                 pick_color = TEAM_COLORS.get(pred["pick_team"], "#00e676")
 
                 time_str = game.game_time_utc.strftime("%I:%M %p UTC") if game.game_time_utc else "TBD"
-                status_map = {
-                    "final": ("FINAL", "#4caf50"),
-                    "live": ("LIVE", "#f44336"),
-                    "pregame": ("PRE", "#ff9800"),
-                    "scheduled": (time_str, "#2196f3"),
-                }
-                status_text, status_color = status_map.get(game.status, (game.status, "#666"))
-
-                # Score display for final games
-                score_html = ""
-                result_html = ""
-                if game.status == "final" and game.away_score is not None:
-                    score_html = (
-                        f"<span style='color:#8892a4; font-size:14px; margin-left:12px;'>"
-                        f"Final: {game.away_score} - {game.home_score}</span>"
-                    )
-                    # Check if model was right
-                    actual_winner = home if game.home_score > game.away_score else away
-                    if actual_winner == pred["pick_team"]:
-                        result_html = "<span style='color:#00e676; font-weight:700; margin-left:8px;'>CORRECT</span>"
-                    else:
-                        result_html = "<span style='color:#ff5252; font-weight:700; margin-left:8px;'>WRONG</span>"
-
-                # Odds display
-                pick_odds_str = ""
-                if pred["pick_odds_am"] is not None:
-                    o = pred["pick_odds_am"]
-                    pick_odds_str = f"+{o:.0f}" if o > 0 else f"{o:.0f}"
-
-                ev_html = ""
-                if pred["pick_ev"] is not None and pred["pick_ev"] > 0:
-                    ev_html = (
-                        f"<span style='color:#00e676; font-size:13px;'>"
-                        f"EV: {pred['pick_ev']:+.1%} | {pred['pick_units']:.1f}u</span>"
-                    )
-                elif pred["pick_ev"] is not None:
-                    ev_html = f"<span style='color:#ff9100; font-size:13px;'>EV: {pred['pick_ev']:+.1%} (no bet)</span>"
-
-                # O/U display
-                ou_odds_str = ""
-                if pred["ou_odds_am"] is not None:
-                    o = pred["ou_odds_am"]
-                    ou_odds_str = f"+{o:.0f}" if o > 0 else f"{o:.0f}"
-
-                ou_ev_html = ""
-                if pred["ou_ev"] is not None and pred["ou_ev"] > 0:
-                    ou_ev_html = (
-                        f"<span style='color:#00e676; font-size:13px;'>"
-                        f"EV: {pred['ou_ev']:+.1%} | {pred['ou_units']:.1f}u</span>"
-                    )
-
-                book_tag = f" @ {pred['pick_book']}" if pred["pick_book"] else ""
-                ou_book_tag = f" @ {pred['ou_book']}" if pred["ou_book"] else ""
-
                 away_sp = game.away_sp.name if game.away_sp else "TBD"
                 home_sp = game.home_sp.name if game.home_sp else "TBD"
 
-                st.markdown(f"""
-                <div class="game-card">
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-                        <div>
-                            <span style="color:{away_color}; font-size:24px; font-weight:700;">{away}</span>
-                            <span class="matchup-vs" style="margin:0 10px;">@</span>
-                            <span style="color:{home_color}; font-size:24px; font-weight:700;">{home}</span>
-                            {score_html}{result_html}
-                        </div>
-                        <div style="text-align:right;">
-                            <span class="tier-badge tier-{pred['tier']}">TIER {pred['tier']}</span>
-                            <span style="color:{status_color}; font-weight:600; font-size:13px; margin-left:12px;">{status_text}</span>
-                        </div>
-                    </div>
+                # Status
+                status_icons = {"final": "FINAL", "live": "LIVE", "pregame": "PRE", "scheduled": time_str}
+                status_text = status_icons.get(game.status, game.status)
 
-                    <div style="color:#8892a4; font-size:13px; margin-bottom:16px;">
-                        {away_sp} vs {home_sp}
-                    </div>
+                st.divider()
 
-                    <div style="display:flex; gap:20px; flex-wrap:wrap;">
-                        <!-- MODEL PICK -->
-                        <div style="flex:1; min-width:220px; background:#0d1520; border:2px solid {pick_color}; border-radius:10px; padding:16px;">
-                            <div style="font-size:11px; color:#8892a4; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Model Pick</div>
-                            <div style="font-size:28px; font-weight:800; color:{pick_color};">{pred['pick_team']} WINS</div>
-                            <div style="font-size:15px; color:#e0e0e0; margin-top:4px;">
-                                {pred['pick_prob']:.0%} probability
-                                <span style="color:{pred['conf_color']}; font-weight:700; margin-left:8px;">{pred['confidence']}</span>
-                            </div>
-                            <div style="margin-top:8px; font-size:13px; color:#b0bec5;">
-                                {pick_odds_str}{book_tag}
-                            </div>
-                            <div style="margin-top:4px;">{ev_html}</div>
-                        </div>
+                # Row 1: Matchup header
+                h1, h2 = st.columns([3, 1])
+                with h1:
+                    matchup_line = f"**{away}** @ **{home}**"
+                    if game.status == "final" and game.away_score is not None:
+                        actual_winner = home if game.home_score > game.away_score else away
+                        result_tag = "CORRECT" if actual_winner == pred["pick_team"] else "WRONG"
+                        matchup_line += f"  |  Final: {game.away_score}-{game.home_score}  |  {result_tag}"
+                    st.markdown(matchup_line)
+                    st.caption(f"{away_sp} vs {home_sp}")
+                with h2:
+                    st.markdown(f"**TIER {pred['tier']}** | {status_text}")
 
-                        <!-- PREDICTED SCORE -->
-                        <div style="flex:0.6; min-width:160px; background:#0d1520; border:1px solid #2d3548; border-radius:10px; padding:16px; text-align:center;">
-                            <div style="font-size:11px; color:#8892a4; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Predicted Score</div>
-                            <div style="font-size:28px; font-weight:700; color:#e0e0e0;">
-                                <span style="color:{away_color};">{pred['away_runs']:.1f}</span>
-                                <span style="color:#5c6878;"> - </span>
-                                <span style="color:{home_color};">{pred['home_runs']:.1f}</span>
-                            </div>
-                            <div style="font-size:13px; color:#8892a4; margin-top:4px;">Total: {pred['total']:.1f}</div>
-                        </div>
+                # Row 2: The four info boxes
+                c1, c2, c3, c4 = st.columns(4)
 
-                        <!-- O/U PICK -->
-                        <div style="flex:0.8; min-width:180px; background:#0d1520; border:1px solid #2d3548; border-radius:10px; padding:16px;">
-                            <div style="font-size:11px; color:#8892a4; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Over/Under</div>
-                            <div style="font-size:22px; font-weight:700; color:#e0e0e0;">
-                                {pred['ou_pick']} {pred['ou_line']}
-                            </div>
-                            <div style="font-size:13px; color:#b0bec5; margin-top:4px;">
-                                {pred['ou_prob']:.0%} prob | {ou_odds_str}{ou_book_tag}
-                            </div>
-                            <div style="margin-top:4px;">{ou_ev_html}</div>
-                        </div>
+                with c1:
+                    st.markdown(f"**MODEL PICK**")
+                    st.markdown(f"### :{'green' if pred['confidence'] == 'HIGH' else 'orange' if pred['confidence'] == 'MEDIUM' else 'red'}[{pred['pick_team']} WINS]")
+                    st.markdown(f"{pred['pick_prob']:.0%} probability  —  **{pred['confidence']}**")
+                    if pred["pick_odds_am"] is not None:
+                        o = pred["pick_odds_am"]
+                        odds_str = f"+{o:.0f}" if o > 0 else f"{o:.0f}"
+                        book_str = f" @ {pred['pick_book']}" if pred["pick_book"] else ""
+                        st.caption(f"Odds: {odds_str}{book_str}")
+                    if pred["pick_ev"] is not None and pred["pick_ev"] > 0:
+                        st.markdown(f":green[EV: {pred['pick_ev']:+.1%} | {pred['pick_units']:.1f}u]")
+                    elif pred["pick_ev"] is not None:
+                        st.markdown(f":orange[EV: {pred['pick_ev']:+.1%} (no bet)]")
 
-                        <!-- WIN PROBS -->
-                        <div style="flex:0.6; min-width:160px; background:#0d1520; border:1px solid #2d3548; border-radius:10px; padding:16px; text-align:center;">
-                            <div style="font-size:11px; color:#8892a4; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Win Probability</div>
-                            <div style="font-size:16px; color:{away_color}; font-weight:600;">{away} {pred['away_win_prob']:.0%}</div>
-                            <div style="font-size:16px; color:{home_color}; font-weight:600;">{home} {pred['home_win_prob']:.0%}</div>
-                        </div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+                with c2:
+                    st.markdown("**PREDICTED SCORE**")
+                    st.markdown(f"### {pred['away_runs']:.1f} - {pred['home_runs']:.1f}")
+                    st.caption(f"Total: {pred['total']:.1f} runs")
+
+                with c3:
+                    st.markdown("**OVER/UNDER**")
+                    st.markdown(f"### {pred['ou_pick']} {pred['ou_line']}")
+                    st.caption(f"{pred['ou_prob']:.0%} probability")
+                    if pred["ou_odds_am"] is not None:
+                        o = pred["ou_odds_am"]
+                        ou_odds_str = f"+{o:.0f}" if o > 0 else f"{o:.0f}"
+                        ou_book_str = f" @ {pred['ou_book']}" if pred["ou_book"] else ""
+                        st.caption(f"Odds: {ou_odds_str}{ou_book_str}")
+                    if pred["ou_ev"] is not None and pred["ou_ev"] > 0:
+                        st.markdown(f":green[EV: {pred['ou_ev']:+.1%} | {pred['ou_units']:.1f}u]")
+
+                with c4:
+                    st.markdown("**WIN PROBABILITY**")
+                    st.metric(away, f"{pred['away_win_prob']:.0%}")
+                    st.metric(home, f"{pred['home_win_prob']:.0%}")
 
     finally:
         session.close()
