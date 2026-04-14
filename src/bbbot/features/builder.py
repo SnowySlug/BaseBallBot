@@ -31,7 +31,8 @@ def build_game_features(session: Session, game: Game,
     """Build the full feature vector for a single game.
 
     Returns a flat dict with features prefixed by 'home_' or 'away_' for team-specific
-    features, and unprefixed for game-level (situational) features.
+    features, unprefixed for game-level (situational) features, and 'diff_' for
+    home-minus-away differentials.
     """
     if registry is None:
         registry = create_default_registry()
@@ -39,22 +40,34 @@ def build_game_features(session: Session, game: Game,
     as_of = game.game_date
     features: dict[str, float | None] = {"game_id": game.id}
 
+    SITUATIONAL_PREFIXES = ("park_", "elevation", "is_dome", "temperature", "wind_",
+                            "humidity", "precipitation", "is_day", "is_inter", "is_double")
+
     # Home team features
     home_feats = registry.compute_all(session, game.id, game.home_team_id, as_of)
+    home_team_keys = []
     for key, val in home_feats.items():
         # Situational features are game-level, don't prefix
-        if key.startswith(("park_", "elevation", "is_dome", "temperature", "wind_",
-                          "humidity", "precipitation", "is_day", "is_inter", "is_double")):
+        if key.startswith(SITUATIONAL_PREFIXES):
             features[key] = val
         else:
             features[f"home_{key}"] = val
+            home_team_keys.append(key)
 
     # Away team features
     away_feats = registry.compute_all(session, game.id, game.away_team_id, as_of)
     for key, val in away_feats.items():
-        if not key.startswith(("park_", "elevation", "is_dome", "temperature", "wind_",
-                               "humidity", "precipitation", "is_day", "is_inter", "is_double")):
+        if not key.startswith(SITUATIONAL_PREFIXES):
             features[f"away_{key}"] = val
+
+    # Differential features: home - away for every shared team-level feature
+    for key in home_team_keys:
+        home_val = home_feats.get(key)
+        away_val = away_feats.get(key)
+        if home_val is not None and away_val is not None:
+            features[f"diff_{key}"] = home_val - away_val
+        else:
+            features[f"diff_{key}"] = None
 
     return features
 

@@ -52,7 +52,7 @@ class StartingPitchingFeatures(FeatureGroup):
             .where(and_(
                 StatcastPitcherMetrics.player_id == sp_id,
                 StatcastPitcherMetrics.season == as_of_date.year,
-                StatcastPitcherMetrics.as_of_date <= as_of_date,
+                StatcastPitcherMetrics.as_of_date < as_of_date,
             ))
             .order_by(StatcastPitcherMetrics.as_of_date.desc())
             .limit(1)

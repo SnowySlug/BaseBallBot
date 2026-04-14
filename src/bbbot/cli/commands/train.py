@@ -11,19 +11,28 @@ app = typer.Typer(help="Model training commands")
 
 @app.command("all")
 def train_all_cmd(
-    season: int = typer.Option(None, "--season", "-s",
-                               help="Season year (default: current year)"),
+    season: list[int] = typer.Option(None, "--season", "-s",
+                                     help="Season year(s), repeatable (default: current year)"),
+    tune: bool = typer.Option(False, "--tune", "-t",
+                              help="Run Optuna hyperparameter tuning"),
+    n_trials: int = typer.Option(50, "--trials", "-n",
+                                 help="Number of Optuna trials (default: 50)"),
 ):
-    """Train all models (win probability + run total) on a season's data."""
-    if season is None:
-        season = date.today().year
+    """Train all models (win probability + run total) on season data."""
+    if not season:
+        season = [date.today().year]
 
-    console.print(f"\n[bold]Training all models for {season} season...[/bold]\n")
+    season_label = ", ".join(str(s) for s in season)
+    label = f"Training all models for {season_label} season(s)"
+    if tune:
+        label += f" with Optuna tuning ({n_trials} trials)"
+    console.print(f"\n[bold]{label}...[/bold]\n")
 
     from bbbot.models.training import train_all
 
+    seasons = season[0] if len(season) == 1 else season
     with console.status("[bold green]Training models..."):
-        results = train_all(season)
+        results = train_all(seasons, tune=tune, n_trials=n_trials)
 
     if "error" in results:
         console.print(f"[red]Error: {results['error']}[/red]")
