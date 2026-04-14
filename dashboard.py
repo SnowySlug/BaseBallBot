@@ -219,23 +219,15 @@ st.sidebar.markdown(
 # PAGE: Today's Predictions
 # ===================================================================
 if page == "Today's Predictions":
-    # Header
     st.markdown(
         "<div class='header-gradient'>"
-        "<h1 style='margin:0; color:white;'>Today's Picks</h1>"
-        "<p style='margin:4px 0 0 0; color:#90caf9;'>Model predictions with Kalshi odds</p>"
+        "<h1 style='margin:0; color:white;'>Today's Game Predictions</h1>"
+        "<p style='margin:4px 0 0 0; color:#90caf9;'>Who wins, predicted scores, and run totals</p>"
         "</div>",
         unsafe_allow_html=True,
     )
 
-    col_date, col_bankroll, col_kelly = st.columns([2, 1, 1])
-    with col_date:
-        game_date = st.date_input("Game Date", value=date.today())
-    with col_bankroll:
-        bankroll = st.number_input("Bankroll ($)", value=1000, step=100)
-    with col_kelly:
-        kelly_frac = st.selectbox("Kelly Fraction", [0.125, 0.25, 0.5, 1.0], index=1,
-                                  format_func=lambda x: f"{x:.0%} Kelly")
+    game_date = st.date_input("Game Date", value=date.today())
 
     # Auto-fetch data for selected date
     ensure_data(game_date)
@@ -249,7 +241,6 @@ if page == "Today's Predictions":
         if not games:
             st.warning(f"No games found for {game_date}. There may be no MLB games scheduled.")
         else:
-            # Load models
             from bbbot.models.training import load_trained_model
             from bbbot.models.baseline import BaselineWinModel, BaselineRunsModel
 
@@ -263,7 +254,7 @@ if page == "Today's Predictions":
                 runs_model = BaselineRunsModel()
 
             if using_trained:
-                st.success("Using trained XGBoost/LightGBM ensemble")
+                st.caption("Model: XGBoost/LightGBM ensemble trained on 2,400+ games")
             else:
                 st.info("Using baseline model — run `bbbot train all` for better predictions.")
 
@@ -283,7 +274,7 @@ if page == "Today's Predictions":
                     away_runs = float(run_preds[1])
                     total = home_runs + away_runs
 
-                    # Model's winner pick
+                    # Model's winner
                     if home_win_prob >= 0.5:
                         pick_team = game.home_team.abbreviation
                         pick_prob = home_win_prob
@@ -293,39 +284,17 @@ if page == "Today's Predictions":
                         pick_prob = away_win_prob
                         pick_side = "away"
 
-                    # Confidence level based on probability edge
+                    # Confidence
                     edge = abs(home_win_prob - 0.5)
                     if edge >= 0.15:
                         confidence = "HIGH"
-                        conf_color = "#00e676"
                     elif edge >= 0.08:
-                        confidence = "MEDIUM"
-                        conf_color = "#ffd600"
+                        confidence = "MED"
                     else:
                         confidence = "LOW"
-                        conf_color = "#ff9100"
 
-                    # Get Kalshi-first odds
-                    odds_info = get_kalshi_odds_for_game(session, game.id)
-
-                    # Compute EV against Kalshi odds
-                    pick_odds_am = odds_info.get("home_ml") if pick_side == "home" else odds_info.get("away_ml")
-                    pick_book = odds_info.get("home_ml_book") if pick_side == "home" else odds_info.get("away_ml_book")
-
-                    pick_ev = None
-                    pick_units = 0.0
-                    if pick_odds_am is not None:
-                        pick_dec = american_to_decimal(pick_odds_am)
-                        pick_ev = calculate_ev(pick_prob, pick_dec)
-                        if pick_ev > 0:
-                            kf = fractional_kelly(pick_prob, pick_dec, kelly_frac)
-                            pick_units = kelly_to_units(kf, bankroll, 100)
-
-                    # O/U analysis
-                    real_total_line = odds_info.get("total_line") or 8.5
-                    over_odds_am = odds_info.get("over_odds") or -110
-                    under_odds_am = odds_info.get("under_odds") or -110
-
+                    # O/U
+                    real_total_line = 8.5  # default
                     if hasattr(runs_model, 'predict_over_under'):
                         over_probs, under_probs = runs_model.predict_over_under(feature_df, line=real_total_line)
                     elif hasattr(runs_model, 'predict_total_probs'):
@@ -333,31 +302,45 @@ if page == "Today's Predictions":
                     else:
                         over_probs = np.array([0.5])
                         under_probs = np.array([0.5])
-
                     ou_pick = "Over" if float(over_probs[0]) > 0.5 else "Under"
                     ou_prob = float(over_probs[0]) if ou_pick == "Over" else float(under_probs[0])
-                    ou_odds_am = over_odds_am if ou_pick == "Over" else under_odds_am
-                    ou_book = odds_info.get("over_book", "") if ou_pick == "Over" else odds_info.get("under_book", "")
 
-                    ou_ev = None
-                    ou_units = 0.0
-                    if ou_odds_am is not None:
-                        ou_dec = american_to_decimal(ou_odds_am)
-                        ou_ev = calculate_ev(ou_prob, ou_dec)
-                        if ou_ev > 0:
-                            kf = fractional_kelly(ou_prob, ou_dec, kelly_frac)
-                            ou_units = kelly_to_units(kf, bankroll, 100)
+                    # Check for Kalshi edge (only Kalshi)
+                    kalshi_edge = None
+                    kalshi_snaps = session.query(OddsSnapshot).filter(
+                        OddsSnapshot.game_id == game.id,
+                        OddsSnapshot.sportsbook == "kalshi",
+                        OddsSnapshot.market_type == "h2h",
+                    ).order_by(OddsSnapshot.captured_at.desc()).first()
 
-                    # Tier based on best EV
-                    best_ev = max(pick_ev or 0, ou_ev or 0)
-                    if best_ev >= 0.05:
-                        tier = "A"
-                    elif best_ev >= 0.03:
-                        tier = "B"
-                    elif best_ev > 0:
-                        tier = "C"
-                    else:
-                        tier = "D"
+                    if kalshi_snaps:
+                        # Use the line for the side the model picks
+                        kalshi_odds = kalshi_snaps.home_line if pick_side == "home" else kalshi_snaps.away_line
+                        if kalshi_odds is not None:
+                            kalshi_implied = american_to_decimal(kalshi_odds)
+                            kalshi_ev = calculate_ev(pick_prob, kalshi_implied)
+                            if kalshi_ev > 0.02:  # only flag if >2% edge
+                                kalshi_edge = {
+                                    "ev": kalshi_ev,
+                                    "odds": kalshi_odds,
+                                    "model_prob": pick_prob,
+                                    "implied_prob": 1 / kalshi_implied,
+                                }
+                        # Also get Kalshi total line if available
+                        kalshi_totals = session.query(OddsSnapshot).filter(
+                            OddsSnapshot.game_id == game.id,
+                            OddsSnapshot.sportsbook == "kalshi",
+                            OddsSnapshot.market_type == "totals",
+                        ).order_by(OddsSnapshot.captured_at.desc()).first()
+                        if kalshi_totals and kalshi_totals.total_line:
+                            real_total_line = kalshi_totals.total_line
+                            # Recompute O/U with Kalshi's line
+                            if hasattr(runs_model, 'predict_over_under'):
+                                over_probs, under_probs = runs_model.predict_over_under(feature_df, line=real_total_line)
+                            elif hasattr(runs_model, 'predict_total_probs'):
+                                over_probs, under_probs = runs_model.predict_total_probs(feature_df, line=real_total_line)
+                            ou_pick = "Over" if float(over_probs[0]) > 0.5 else "Under"
+                            ou_prob = float(over_probs[0]) if ou_pick == "Over" else float(under_probs[0])
 
                     predictions.append({
                         "game": game,
@@ -368,116 +351,86 @@ if page == "Today's Predictions":
                         "total": total,
                         "pick_team": pick_team,
                         "pick_prob": pick_prob,
-                        "pick_side": pick_side,
                         "confidence": confidence,
-                        "conf_color": conf_color,
-                        "pick_odds_am": pick_odds_am,
-                        "pick_book": pick_book or "",
-                        "pick_ev": pick_ev,
-                        "pick_units": pick_units,
                         "ou_pick": ou_pick,
                         "ou_prob": ou_prob,
                         "ou_line": real_total_line,
-                        "ou_odds_am": ou_odds_am,
-                        "ou_book": ou_book,
-                        "ou_ev": ou_ev,
-                        "ou_units": ou_units,
-                        "over_prob": float(over_probs[0]),
-                        "under_prob": float(under_probs[0]),
-                        "tier": tier,
-                        "best_ev": best_ev,
-                        "odds_info": odds_info,
+                        "kalshi_edge": kalshi_edge,
                     })
                 except Exception as e:
                     st.warning(f"Error predicting {game.away_team.abbreviation} @ {game.home_team.abbreviation}: {e}")
                     continue
 
-            # Sort: highest confidence first, then by EV
-            tier_order = {"A": 0, "B": 1, "C": 2, "D": 3}
-            predictions.sort(key=lambda p: (tier_order[p["tier"]], -p["best_ev"]))
+            # Sort by confidence
+            conf_order = {"HIGH": 0, "MED": 1, "LOW": 2}
+            predictions.sort(key=lambda p: (conf_order[p["confidence"]], -p["pick_prob"]))
 
-            # Summary metrics
-            total_bets = sum(1 for p in predictions if (p["pick_ev"] or 0) > 0 or (p["ou_ev"] or 0) > 0)
-            a_picks = sum(1 for p in predictions if p["tier"] == "A")
-            positive_ev = [p for p in predictions if (p["pick_ev"] or 0) > 0]
-            avg_ev = np.mean([p["pick_ev"] for p in positive_ev]) if positive_ev else 0
-
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Games", len(predictions))
-            m2.metric("+EV Bets", total_bets)
-            m3.metric("High Confidence", sum(1 for p in predictions if p["confidence"] == "HIGH"))
-            m4.metric("Avg Pick EV", f"{avg_ev:+.1%}" if avg_ev else "N/A")
+            # Summary
+            high_conf = sum(1 for p in predictions if p["confidence"] == "HIGH")
+            edges = sum(1 for p in predictions if p["kalshi_edge"])
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Games Today", len(predictions))
+            m2.metric("High Confidence Picks", high_conf)
+            m3.metric("Kalshi Edges Found", edges)
 
             st.divider()
 
-            # ---- Render game cards ----
+            # Render each game
             for pred in predictions:
                 game = pred["game"]
                 away = game.away_team.abbreviation
                 home = game.home_team.abbreviation
-                pick_color = TEAM_COLORS.get(pred["pick_team"], "#00e676")
-
-                time_str = game.game_time_utc.strftime("%I:%M %p UTC") if game.game_time_utc else "TBD"
                 away_sp = game.away_sp.name if game.away_sp else "TBD"
                 home_sp = game.home_sp.name if game.home_sp else "TBD"
+                time_str = game.game_time_utc.strftime("%I:%M %p UTC") if game.game_time_utc else "TBD"
 
-                # Status
-                status_icons = {"final": "FINAL", "live": "LIVE", "pregame": "PRE", "scheduled": time_str}
-                status_text = status_icons.get(game.status, game.status)
+                # Header row
+                hdr = f"### {away} @ {home}"
+                if game.status == "final" and game.away_score is not None:
+                    actual_winner = home if game.home_score > game.away_score else away
+                    if actual_winner == pred["pick_team"]:
+                        hdr += f" — Final: {game.away_score}-{game.home_score} :green[Model Correct]"
+                    else:
+                        hdr += f" — Final: {game.away_score}-{game.home_score} :red[Model Wrong]"
+                elif game.status == "live":
+                    hdr += " — :red[LIVE]"
+                else:
+                    hdr += f" — {time_str}"
+                st.markdown(hdr)
+                st.caption(f"{away_sp} vs {home_sp}")
 
-                st.divider()
-
-                # Row 1: Matchup header
-                h1, h2 = st.columns([3, 1])
-                with h1:
-                    matchup_line = f"**{away}** @ **{home}**"
-                    if game.status == "final" and game.away_score is not None:
-                        actual_winner = home if game.home_score > game.away_score else away
-                        result_tag = "CORRECT" if actual_winner == pred["pick_team"] else "WRONG"
-                        matchup_line += f"  |  Final: {game.away_score}-{game.home_score}  |  {result_tag}"
-                    st.markdown(matchup_line)
-                    st.caption(f"{away_sp} vs {home_sp}")
-                with h2:
-                    st.markdown(f"**TIER {pred['tier']}** | {status_text}")
-
-                # Row 2: The four info boxes
-                c1, c2, c3, c4 = st.columns(4)
+                # Main columns
+                c1, c2, c3 = st.columns(3)
 
                 with c1:
-                    st.markdown(f"**MODEL PICK**")
-                    st.markdown(f"### :{'green' if pred['confidence'] == 'HIGH' else 'orange' if pred['confidence'] == 'MEDIUM' else 'red'}[{pred['pick_team']} WINS]")
-                    st.markdown(f"{pred['pick_prob']:.0%} probability  —  **{pred['confidence']}**")
-                    if pred["pick_odds_am"] is not None:
-                        o = pred["pick_odds_am"]
-                        odds_str = f"+{o:.0f}" if o > 0 else f"{o:.0f}"
-                        book_str = f" @ {pred['pick_book']}" if pred["pick_book"] else ""
-                        st.caption(f"Odds: {odds_str}{book_str}")
-                    if pred["pick_ev"] is not None and pred["pick_ev"] > 0:
-                        st.markdown(f":green[EV: {pred['pick_ev']:+.1%} | {pred['pick_units']:.1f}u]")
-                    elif pred["pick_ev"] is not None:
-                        st.markdown(f":orange[EV: {pred['pick_ev']:+.1%} (no bet)]")
+                    conf_tag = {"HIGH": ":green", "MED": ":orange", "LOW": ":red"}[pred["confidence"]]
+                    st.markdown(f"**Predicted Winner**")
+                    st.markdown(f"## {conf_tag}[{pred['pick_team']}]")
+                    st.markdown(f"{pred['pick_prob']:.0%} win probability — **{pred['confidence']}** confidence")
 
                 with c2:
-                    st.markdown("**PREDICTED SCORE**")
-                    st.markdown(f"### {pred['away_runs']:.1f} - {pred['home_runs']:.1f}")
-                    st.caption(f"Total: {pred['total']:.1f} runs")
+                    st.markdown("**Predicted Score**")
+                    st.markdown(f"## {pred['away_runs']:.1f} - {pred['home_runs']:.1f}")
+                    st.caption(f"{away} - {home}")
 
                 with c3:
-                    st.markdown("**OVER/UNDER**")
-                    st.markdown(f"### {pred['ou_pick']} {pred['ou_line']}")
-                    st.caption(f"{pred['ou_prob']:.0%} probability")
-                    if pred["ou_odds_am"] is not None:
-                        o = pred["ou_odds_am"]
-                        ou_odds_str = f"+{o:.0f}" if o > 0 else f"{o:.0f}"
-                        ou_book_str = f" @ {pred['ou_book']}" if pred["ou_book"] else ""
-                        st.caption(f"Odds: {ou_odds_str}{ou_book_str}")
-                    if pred["ou_ev"] is not None and pred["ou_ev"] > 0:
-                        st.markdown(f":green[EV: {pred['ou_ev']:+.1%} | {pred['ou_units']:.1f}u]")
+                    st.markdown("**Run Total**")
+                    st.markdown(f"## {pred['total']:.1f} runs")
+                    st.markdown(f"Model says **{pred['ou_pick']}** {pred['ou_line']} ({pred['ou_prob']:.0%})")
 
-                with c4:
-                    st.markdown("**WIN PROBABILITY**")
-                    st.metric(away, f"{pred['away_win_prob']:.0%}")
-                    st.metric(home, f"{pred['home_win_prob']:.0%}")
+                # Kalshi edge callout — only shows when there's a real edge
+                if pred["kalshi_edge"]:
+                    e = pred["kalshi_edge"]
+                    k_odds = e["odds"]
+                    k_odds_str = f"+{k_odds:.0f}" if k_odds > 0 else f"{k_odds:.0f}"
+                    st.success(
+                        f"**Kalshi Edge:** Model gives {pred['pick_team']} a "
+                        f"{e['model_prob']:.0%} chance, but Kalshi implies "
+                        f"{e['implied_prob']:.0%} ({k_odds_str}). "
+                        f"That's a **{e['ev']:+.1%}** edge."
+                    )
+
+                st.divider()
 
     finally:
         session.close()
