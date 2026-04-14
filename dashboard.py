@@ -202,7 +202,7 @@ st.sidebar.divider()
 
 page = st.sidebar.radio(
     "Navigate",
-    ["Today's Predictions", "Game Explorer", "Model Performance", "Team Stats", "Odds Dashboard"],
+    ["Today's Predictions", "Game Explorer", "Model Performance", "Team Stats"],
     label_visibility="collapsed",
 )
 
@@ -510,7 +510,7 @@ elif page == "Model Performance":
     st.markdown(
         "<div class='header-gradient'>"
         "<h1 style='margin:0; color:white;'>Model Performance</h1>"
-        "<p style='margin:4px 0 0 0; color:#90caf9;'>Training metrics, feature importance, and calibration</p>"
+        "<p style='margin:4px 0 0 0; color:#90caf9;'>Tracking accuracy from today onwards</p>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -529,7 +529,7 @@ elif page == "Model Performance":
         st.subheader("Win Probability Model")
         m1, m2, m3, m4 = st.columns(4)
         metrics = win_meta.get("metrics", {})
-        m1.metric("Accuracy", f"{metrics.get('accuracy', 0):.1%}")
+        m1.metric("Training Accuracy", f"{metrics.get('accuracy', 0):.1%}")
         m2.metric("Log Loss", f"{metrics.get('log_loss', 0):.4f}")
         m3.metric("Brier Score", f"{metrics.get('brier_score', 0):.4f}")
         m4.metric("Training Samples", f"{win_meta.get('n_samples', 0):,}")
@@ -572,57 +572,109 @@ elif page == "Model Performance":
     else:
         st.warning("No trained run model found.")
 
-    # Show recent prediction accuracy if we have final games
+    # Live accuracy — only games from today (2026-04-13) onwards
     st.divider()
-    st.subheader("Recent Prediction Accuracy")
+    st.subheader("Live Accuracy (2026 Season — Today Onwards)")
+    st.caption("Tracking model predictions against actual results starting April 13, 2026")
+
+    tracking_start = date(2026, 4, 13)
 
     session = get_sess()
     try:
-        recent_final = session.query(Game).filter(
+        # Load models for retroactive predictions on completed games
+        from bbbot.models.training import load_trained_model
+        from bbbot.models.baseline import BaselineWinModel, BaselineRunsModel
+
+        win_model = load_trained_model("win_probability")
+        runs_model = load_trained_model("run_total")
+        if not win_model:
+            win_model = BaselineWinModel()
+        if not runs_model:
+            runs_model = BaselineRunsModel()
+
+        registry = create_default_registry()
+
+        final_games = session.query(Game).filter(
+            Game.game_date >= tracking_start,
             Game.status == "final",
             Game.home_score.isnot(None),
-        ).order_by(Game.game_date.desc()).limit(200).all()
+        ).order_by(Game.game_date).all()
 
-        if recent_final:
-            home_wins = sum(1 for g in recent_final if g.home_score > g.away_score)
-            away_wins = len(recent_final) - home_wins
+        if not final_games:
+            st.info("No completed games since tracking started. Results will appear here as games finish.")
+        else:
+            correct = 0
+            wrong = 0
+            total_run_error = []
+            results_by_date = {}
 
-            fig = go.Figure(data=[
-                go.Pie(
-                    labels=["Home Wins", "Away Wins"],
-                    values=[home_wins, away_wins],
-                    marker=dict(colors=["#2196f3", "#ff9800"]),
-                    hole=0.4,
-                )
-            ])
-            fig.update_layout(
-                title=f"Home vs Away Wins (Last {len(recent_final)} Games)",
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                height=400,
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            for game in final_games:
+                try:
+                    features = build_game_features(session, game, registry)
+                    feature_df = pd.DataFrame([features])
 
-            # Scoring trends
-            dates = sorted(set(g.game_date for g in recent_final))[-30:]
-            daily_avg = []
-            for d in dates:
-                day_games = [g for g in recent_final if g.game_date == d]
-                avg_total = np.mean([g.total_runs for g in day_games if g.total_runs])
-                daily_avg.append({"date": d, "avg_total_runs": avg_total})
+                    home_win_prob = float(win_model.predict_proba(feature_df)[0])
+                    predicted_winner = game.home_team.abbreviation if home_win_prob >= 0.5 else game.away_team.abbreviation
+                    actual_winner = game.home_team.abbreviation if game.home_score > game.away_score else game.away_team.abbreviation
 
-            if daily_avg:
-                trend_df = pd.DataFrame(daily_avg)
+                    if predicted_winner == actual_winner:
+                        correct += 1
+                    else:
+                        wrong += 1
+
+                    run_preds = runs_model.predict(feature_df)[0]
+                    pred_total = float(run_preds[0]) + float(run_preds[1])
+                    actual_total = game.home_score + game.away_score
+                    total_run_error.append(abs(pred_total - actual_total))
+
+                    d = game.game_date
+                    if d not in results_by_date:
+                        results_by_date[d] = {"correct": 0, "wrong": 0}
+                    if predicted_winner == actual_winner:
+                        results_by_date[d]["correct"] += 1
+                    else:
+                        results_by_date[d]["wrong"] += 1
+                except Exception:
+                    continue
+
+            total_games = correct + wrong
+            accuracy = correct / total_games if total_games > 0 else 0
+            avg_run_err = np.mean(total_run_error) if total_run_error else 0
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Games Tracked", total_games)
+            m2.metric("Correct Picks", correct)
+            m3.metric("Win Accuracy", f"{accuracy:.1%}")
+            m4.metric("Avg Run Error", f"{avg_run_err:.1f}")
+
+            # Accuracy over time chart
+            if results_by_date:
+                chart_data = []
+                running_correct = 0
+                running_total = 0
+                for d in sorted(results_by_date.keys()):
+                    running_correct += results_by_date[d]["correct"]
+                    running_total += results_by_date[d]["correct"] + results_by_date[d]["wrong"]
+                    chart_data.append({
+                        "date": d,
+                        "daily_accuracy": results_by_date[d]["correct"] / (results_by_date[d]["correct"] + results_by_date[d]["wrong"]),
+                        "cumulative_accuracy": running_correct / running_total,
+                    })
+
+                chart_df = pd.DataFrame(chart_data)
                 fig = px.line(
-                    trend_df, x="date", y="avg_total_runs",
-                    title="Average Total Runs Per Game (Last 30 Days)",
-                    labels={"avg_total_runs": "Avg Runs", "date": "Date"},
+                    chart_df, x="date", y="cumulative_accuracy",
+                    title="Cumulative Win Prediction Accuracy",
+                    labels={"cumulative_accuracy": "Accuracy", "date": "Date"},
                     color_discrete_sequence=["#00e676"],
                 )
+                fig.add_hline(y=0.5, line_dash="dash", line_color="#ff5252",
+                              annotation_text="Coin Flip (50%)")
                 fig.update_layout(
                     template="plotly_dark",
                     paper_bgcolor="rgba(0,0,0,0)",
                     plot_bgcolor="rgba(0,0,0,0)",
+                    yaxis=dict(tickformat=".0%", range=[0, 1]),
                 )
                 st.plotly_chart(fig, use_container_width=True)
     finally:
@@ -633,10 +685,12 @@ elif page == "Model Performance":
 # PAGE: Team Stats
 # ===================================================================
 elif page == "Team Stats":
+    current_season = date.today().year
+
     st.markdown(
         "<div class='header-gradient'>"
-        "<h1 style='margin:0; color:white;'>Team Stats</h1>"
-        "<p style='margin:4px 0 0 0; color:#90caf9;'>Season records, batting averages, and pitching performance</p>"
+        f"<h1 style='margin:0; color:white;'>{current_season} Team Stats</h1>"
+        "<p style='margin:4px 0 0 0; color:#90caf9;'>Current season records and batting stats</p>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -645,28 +699,31 @@ elif page == "Team Stats":
     try:
         teams = session.query(Team).order_by(Team.division, Team.name).all()
 
-        # Build team records
         team_stats = []
         for team in teams:
             wins = session.query(Game).filter(
                 Game.winning_team_id == team.id,
                 Game.status == "final",
+                Game.season == current_season,
             ).count()
             losses = session.query(Game).filter(
                 Game.status == "final",
+                Game.season == current_season,
                 ((Game.home_team_id == team.id) | (Game.away_team_id == team.id)),
                 Game.winning_team_id != team.id,
                 Game.winning_team_id.isnot(None),
             ).count()
 
-            # Recent batting
-            recent_batting = session.query(TeamBattingDaily).filter(
+            # This season's batting only
+            season_batting = session.query(TeamBattingDaily).filter(
                 TeamBattingDaily.team_id == team.id,
-            ).order_by(TeamBattingDaily.game_date.desc()).limit(30).all()
+                TeamBattingDaily.game_date >= date(current_season, 1, 1),
+            ).order_by(TeamBattingDaily.game_date.desc()).all()
 
-            avg_runs = np.mean([b.runs for b in recent_batting if b.runs is not None]) if recent_batting else 0
-            avg_hits = np.mean([b.hits for b in recent_batting if b.hits is not None]) if recent_batting else 0
-            avg_hr = np.mean([b.home_runs for b in recent_batting if b.home_runs is not None]) if recent_batting else 0
+            avg_runs = np.mean([b.runs for b in season_batting if b.runs is not None]) if season_batting else 0
+            avg_hits = np.mean([b.hits for b in season_batting if b.hits is not None]) if season_batting else 0
+            avg_hr = np.mean([b.home_runs for b in season_batting if b.home_runs is not None]) if season_batting else 0
+            avg_k = np.mean([b.strikeouts for b in season_batting if b.strikeouts is not None]) if season_batting else 0
 
             pct = wins / (wins + losses) if (wins + losses) > 0 else 0
 
@@ -676,9 +733,11 @@ elif page == "Team Stats":
                 "W": wins,
                 "L": losses,
                 "PCT": pct,
-                "R/G (30d)": round(avg_runs, 1),
-                "H/G (30d)": round(avg_hits, 1),
-                "HR/G (30d)": round(avg_hr, 2),
+                "R/G": round(avg_runs, 1),
+                "H/G": round(avg_hits, 1),
+                "HR/G": round(avg_hr, 2),
+                "K/G": round(avg_k, 1),
+                "Games": len(season_batting),
             })
 
         df = pd.DataFrame(team_stats).sort_values("PCT", ascending=False)
@@ -705,10 +764,10 @@ elif page == "Team Stats":
         # Runs per game chart
         st.divider()
         fig = px.bar(
-            df.sort_values("R/G (30d)", ascending=True),
-            x="R/G (30d)", y="Team", orientation="h",
-            title="Runs Per Game (Last 30 Games)",
-            color="R/G (30d)",
+            df.sort_values("R/G", ascending=True),
+            x="R/G", y="Team", orientation="h",
+            title=f"{current_season} Runs Per Game",
+            color="R/G",
             color_continuous_scale="reds",
         )
         fig.update_layout(
@@ -718,93 +777,6 @@ elif page == "Team Stats":
             height=700,
         )
         st.plotly_chart(fig, use_container_width=True)
-
-    finally:
-        session.close()
-
-
-# ===================================================================
-# PAGE: Odds Dashboard
-# ===================================================================
-elif page == "Odds Dashboard":
-    st.markdown(
-        "<div class='header-gradient'>"
-        "<h1 style='margin:0; color:white;'>Odds Dashboard</h1>"
-        "<p style='margin:4px 0 0 0; color:#90caf9;'>Live odds comparison across sportsbooks</p>"
-        "</div>",
-        unsafe_allow_html=True,
-    )
-
-    session = get_sess()
-    try:
-        # Get today's games with odds
-        today_games = session.query(Game).filter(
-            Game.game_date == date.today(),
-        ).order_by(Game.game_time_utc).all()
-
-        if not today_games:
-            st.info("No games today. Try ingesting the schedule first.")
-        else:
-            for game in today_games:
-                away = game.away_team.abbreviation
-                home = game.home_team.abbreviation
-
-                with st.expander(f"{away} @ {home}", expanded=True):
-                    # Get all odds for this game
-                    h2h_odds = session.query(OddsSnapshot).filter(
-                        OddsSnapshot.game_id == game.id,
-                        OddsSnapshot.market_type == "h2h",
-                    ).order_by(OddsSnapshot.captured_at.desc()).all()
-
-                    total_odds = session.query(OddsSnapshot).filter(
-                        OddsSnapshot.game_id == game.id,
-                        OddsSnapshot.market_type == "totals",
-                    ).order_by(OddsSnapshot.captured_at.desc()).all()
-
-                    if h2h_odds:
-                        st.markdown("**Moneyline Odds**")
-                        seen_books = set()
-                        ml_rows = []
-                        for snap in h2h_odds:
-                            if snap.sportsbook in seen_books:
-                                continue
-                            seen_books.add(snap.sportsbook)
-                            h = snap.home_line
-                            a = snap.away_line
-                            ml_rows.append({
-                                "Sportsbook": snap.sportsbook,
-                                f"{home} ML": f"+{h:.0f}" if h and h > 0 else (f"{h:.0f}" if h else ""),
-                                f"{away} ML": f"+{a:.0f}" if a and a > 0 else (f"{a:.0f}" if a else ""),
-                            })
-                        if ml_rows:
-                            st.dataframe(pd.DataFrame(ml_rows), use_container_width=True, hide_index=True)
-
-                    if total_odds:
-                        st.markdown("**Totals**")
-                        seen_books = set()
-                        tot_rows = []
-                        for snap in total_odds:
-                            if snap.sportsbook in seen_books:
-                                continue
-                            seen_books.add(snap.sportsbook)
-                            tot_rows.append({
-                                "Sportsbook": snap.sportsbook,
-                                "Line": snap.total_line,
-                                "Over": f"+{snap.over_odds:.0f}" if snap.over_odds and snap.over_odds > 0 else (f"{snap.over_odds:.0f}" if snap.over_odds else ""),
-                                "Under": f"+{snap.under_odds:.0f}" if snap.under_odds and snap.under_odds > 0 else (f"{snap.under_odds:.0f}" if snap.under_odds else ""),
-                            })
-                        if tot_rows:
-                            st.dataframe(pd.DataFrame(tot_rows), use_container_width=True, hide_index=True)
-
-                    if not h2h_odds and not total_odds:
-                        st.caption("No odds data available for this game.")
-
-        # Overall odds stats
-        st.divider()
-        total_snaps = session.query(OddsSnapshot).count()
-        unique_books = session.query(OddsSnapshot.sportsbook).distinct().count()
-        st.metric("Total Odds Snapshots", f"{total_snaps:,}")
-        st.metric("Sportsbooks Tracked", unique_books)
 
     finally:
         session.close()
