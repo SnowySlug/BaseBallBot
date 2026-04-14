@@ -11,7 +11,10 @@ env/
 data/
 !data/models/
 !data/models/**
+!data/db/
+!data/db/**
 *.db
+!data/db/*.db
 .env
 .idea/
 *.swp
