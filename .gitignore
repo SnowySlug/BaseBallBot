@@ -9,6 +9,8 @@ build/
 venv/
 env/
 data/
+!data/models/
+!data/models/**
 *.db
 .env
 .idea/
