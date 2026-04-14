@@ -311,7 +311,7 @@ if page == "Today's Predictions":
                         OddsSnapshot.game_id == game.id,
                         OddsSnapshot.sportsbook == "kalshi",
                         OddsSnapshot.market_type == "h2h",
-                    ).order_by(OddsSnapshot.captured_at.desc()).first()
+                    ).order_by(OddsSnapshot.captured_at.asc()).first()  # pregame odds (first snapshot)
 
                     if kalshi_snaps:
                         # Use the line for the side the model picks
@@ -331,7 +331,7 @@ if page == "Today's Predictions":
                             OddsSnapshot.game_id == game.id,
                             OddsSnapshot.sportsbook == "kalshi",
                             OddsSnapshot.market_type == "totals",
-                        ).order_by(OddsSnapshot.captured_at.desc()).first()
+                        ).order_by(OddsSnapshot.captured_at.asc()).first()  # pregame odds
                         if kalshi_totals and kalshi_totals.total_line:
                             real_total_line = kalshi_totals.total_line
                             # Recompute O/U with Kalshi's line

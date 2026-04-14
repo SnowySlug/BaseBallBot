@@ -1,4 +1,4 @@
-"""Daily prediction card — formatted CLI output."""
+"""Daily prediction card — formatted CLI output matching dashboard style."""
 
 from datetime import date, datetime
 
@@ -10,15 +10,16 @@ from rich.text import Text
 
 def render_daily_card(predictions: list[dict], game_date: date,
                       console: Console | None = None) -> None:
-    """Render the daily prediction card as a rich table.
+    """Render the daily prediction card matching the dashboard layout.
 
     Each prediction dict should have:
         away_team, home_team, away_sp, home_sp, game_time,
         home_win_prob, away_win_prob,
         home_runs_pred, away_runs_pred, total_pred,
-        confidence_tier, home_ml_ev, away_ml_ev,
-        over_prob, under_prob,
-        recommended_bet, recommended_units
+        pick_team, pick_prob, confidence,
+        ou_pick, ou_prob, ou_line,
+        kalshi_edge (dict or None),
+        status, away_score, home_score
     """
     if console is None:
         console = Console()
@@ -31,75 +32,88 @@ def render_daily_card(predictions: list[dict], game_date: date,
     console.print()
     console.print(Panel(
         f"[bold white]MLB Predictions -- {game_date}[/bold white]\n"
-        f"[dim]Generated at {datetime.now().strftime('%H:%M:%S')} | "
-        f"Baseline Model v0.1[/dim]",
+        f"[dim]Generated at {datetime.now().strftime('%H:%M:%S')}[/dim]",
         border_style="blue",
     ))
 
-    # Main prediction table
-    table = Table(show_header=True, header_style="bold cyan", padding=(0, 1))
-    table.add_column("Time", style="dim", width=5)
-    table.add_column("Matchup", width=12)
-    table.add_column("Pitchers", width=28)
-    table.add_column("Win %", justify="center", width=11)
-    table.add_column("Pred Score", justify="center", width=10)
-    table.add_column("Total", justify="center", width=5)
-    table.add_column("Tier", justify="center", width=4)
-    table.add_column("Best Bet", width=18)
-    table.add_column("Units", justify="right", width=5)
+    # Summary stats
+    high_conf = sum(1 for p in predictions if p.get("confidence") == "HIGH")
+    edges = sum(1 for p in predictions if p.get("kalshi_edge"))
+    console.print(
+        f"  [bold]{len(predictions)}[/bold] games  |  "
+        f"[bold green]{high_conf}[/bold green] high confidence  |  "
+        f"[bold yellow]{edges}[/bold yellow] Kalshi edges"
+    )
+    console.print()
 
+    # Render each game card
     for pred in predictions:
-        time_str = pred.get("game_time", "TBD")
         away = pred.get("away_team", "?")
         home = pred.get("home_team", "?")
-        matchup = f"{away} @ {home}"
-
         away_sp = pred.get("away_sp", "TBD")
         home_sp = pred.get("home_sp", "TBD")
-        pitchers = f"{away_sp} vs {home_sp}"
+        time_str = pred.get("game_time", "TBD")
 
-        hwp = pred.get("home_win_prob", 0.5)
-        awp = pred.get("away_win_prob", 0.5)
-        win_pct = f"{awp:.0%}/{hwp:.0%}"
+        # Header with status
+        status = pred.get("status", "scheduled")
+        header = f"[bold white]{away} @ {home}[/bold white]"
+        if status == "final" and pred.get("away_score") is not None:
+            actual_winner = home if pred.get("home_score", 0) > pred.get("away_score", 0) else away
+            if actual_winner == pred.get("pick_team"):
+                header += f" — Final: {pred['away_score']}-{pred['home_score']} [bold green]Model Correct[/bold green]"
+            else:
+                header += f" — Final: {pred['away_score']}-{pred['home_score']} [bold red]Model Wrong[/bold red]"
+        elif status == "live":
+            header += " — [bold red]LIVE[/bold red]"
+        else:
+            header += f" — {time_str}"
 
-        hr = pred.get("home_runs_pred", 4.5)
-        ar = pred.get("away_runs_pred", 4.5)
-        pred_score = f"{ar:.1f}-{hr:.1f}"
+        console.print(f"  {header}")
+        console.print(f"  [dim]{away_sp} vs {home_sp}[/dim]")
 
-        total = pred.get("total_pred", 9.0)
+        # Predicted Winner
+        pick_team = pred.get("pick_team", "?")
+        pick_prob = pred.get("pick_prob", 0.5)
+        confidence = pred.get("confidence", "LOW")
 
-        tier = pred.get("confidence_tier", "D")
-        tier_colors = {"A": "green bold", "B": "yellow", "C": "dim", "D": "dim"}
-        tier_style = tier_colors.get(tier, "dim")
+        conf_colors = {"HIGH": "green", "MED": "yellow", "LOW": "red"}
+        conf_color = conf_colors.get(confidence, "red")
 
-        rec_bet = pred.get("recommended_bet", "-")
-        units = pred.get("recommended_units", 0)
-        units_str = f"{units:.1f}" if units > 0 else "-"
-
-        table.add_row(
-            time_str, matchup, pitchers, win_pct,
-            pred_score, f"{total:.1f}",
-            f"[{tier_style}]{tier}[/{tier_style}]",
-            rec_bet, units_str,
+        console.print(
+            f"  Predicted Winner: [{conf_color} bold]{pick_team}[/{conf_color} bold]  "
+            f"{pick_prob:.0%} win probability — [bold]{confidence}[/bold] confidence"
         )
 
-    console.print(table)
+        # Predicted Score
+        hr = pred.get("home_runs_pred", 0)
+        ar = pred.get("away_runs_pred", 0)
+        total = pred.get("total_pred", 0)
+        console.print(
+            f"  Predicted Score:  [bold]{ar:.1f} - {hr:.1f}[/bold]  ({away} - {home})"
+        )
 
-    # Summary of top picks
-    top_picks = [p for p in predictions if p.get("confidence_tier") in ("A", "B")]
-    if top_picks:
-        console.print()
-        console.print("[bold green]Top Picks:[/bold green]")
-        for pick in top_picks:
-            bet = pick.get("recommended_bet", "")
-            units = pick.get("recommended_units", 0)
-            ev = pick.get("best_ev", 0)
+        # Run Total + O/U
+        ou_pick = pred.get("ou_pick", "Over")
+        ou_prob = pred.get("ou_prob", 0.5)
+        ou_line = pred.get("ou_line", 8.5)
+        console.print(
+            f"  Run Total:        [bold]{total:.1f} runs[/bold]  "
+            f"Model says [bold]{ou_pick}[/bold] {ou_line} ({ou_prob:.0%})"
+        )
+
+        # Kalshi edge callout (only when >2% edge)
+        kalshi_edge = pred.get("kalshi_edge")
+        if kalshi_edge:
+            k_odds = kalshi_edge["odds"]
+            k_odds_str = f"+{k_odds:.0f}" if k_odds > 0 else f"{k_odds:.0f}"
             console.print(
-                f"  [bold]{bet}[/bold] — "
-                f"{units:.1f}u — "
-                f"EV: {ev:+.1%}"
+                f"  [bold green]Kalshi Edge:[/bold green] Model gives {pick_team} a "
+                f"{kalshi_edge['model_prob']:.0%} chance, but Kalshi implies "
+                f"{kalshi_edge['implied_prob']:.0%} ({k_odds_str}). "
+                f"That's a [bold]+{kalshi_edge['ev']:.1%}[/bold] edge."
             )
-    else:
-        console.print("\n[dim]No high-confidence picks today.[/dim]")
+
+        console.print("  " + "-" * 60)
+        console.print()
 
     console.print()

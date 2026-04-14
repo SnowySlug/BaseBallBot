@@ -1,4 +1,4 @@
-"""CLI commands for generating predictions."""
+"""CLI commands for generating predictions — matches dashboard format."""
 
 from datetime import date, datetime
 
@@ -7,9 +7,9 @@ import pandas as pd
 import typer
 from rich.console import Console
 
-from bbbot.betting.kelly import fractional_kelly, kelly_to_units
 from bbbot.betting.odds_math import american_to_decimal, calculate_ev
 from bbbot.db.engine import get_session, init_db
+from bbbot.db.models import OddsSnapshot
 from bbbot.db.queries import get_games_by_date
 from bbbot.features.builder import build_game_features, create_default_registry
 from bbbot.ingest.schedule import DailyIngestor
@@ -30,9 +30,6 @@ def _parse_date(date_str: str | None) -> date:
 @app.command()
 def today(
     date_str: str = typer.Option(None, "--date", "-d", help="Date (YYYY-MM-DD), default today"),
-    bankroll: float = typer.Option(1000.0, "--bankroll", "-b", help="Bankroll in dollars"),
-    kelly: float = typer.Option(0.25, "--kelly", "-k", help="Kelly fraction (0.25 = quarter)"),
-    unit_size: float = typer.Option(100.0, "--unit", "-u", help="Unit size in dollars"),
     export: str = typer.Option(None, "--export", "-e", help="Export format: csv, json, html, or all"),
 ):
     """Generate predictions for today's MLB games."""
@@ -74,149 +71,121 @@ def today(
 
         predictions = []
         for game in games:
-            features = build_game_features(session, game, registry)
-            feature_df = pd.DataFrame([features])
+            try:
+                features = build_game_features(session, game, registry)
+                feature_df = pd.DataFrame([features])
 
-            # Win probability
-            home_win_prob = float(win_model.predict_proba(feature_df)[0])
-            away_win_prob = 1.0 - home_win_prob
+                # Win probability
+                home_win_prob = float(win_model.predict_proba(feature_df)[0])
+                away_win_prob = 1.0 - home_win_prob
 
-            # Run totals
-            run_preds = runs_model.predict(feature_df)[0]
-            home_runs = float(run_preds[0])
-            away_runs = float(run_preds[1])
-            total = home_runs + away_runs
+                # Run totals
+                run_preds = runs_model.predict(feature_df)[0]
+                home_runs = float(run_preds[0])
+                away_runs = float(run_preds[1])
+                total = home_runs + away_runs
 
-            # Over/under probabilities (use 8.5 as default line)
-            if hasattr(runs_model, 'predict_over_under'):
-                over_probs, under_probs = runs_model.predict_over_under(
-                    feature_df, line=8.5
-                )
-            elif hasattr(runs_model, 'predict_total_probs'):
-                over_probs, under_probs = runs_model.predict_total_probs(
-                    feature_df, line=8.5
-                )
-            else:
-                over_probs = np.array([0.5])
-                under_probs = np.array([0.5])
+                # Model's winner
+                if home_win_prob >= 0.5:
+                    pick_team = game.home_team.abbreviation
+                    pick_prob = home_win_prob
+                    pick_side = "home"
+                else:
+                    pick_team = game.away_team.abbreviation
+                    pick_prob = away_win_prob
+                    pick_side = "away"
 
-            # Get real odds if available
-            from bbbot.ingest.odds_ingest import get_best_odds_for_game
-            odds_info = get_best_odds_for_game(session, game.id)
+                # Confidence
+                edge = abs(home_win_prob - 0.5)
+                if edge >= 0.15:
+                    confidence = "HIGH"
+                elif edge >= 0.08:
+                    confidence = "MED"
+                else:
+                    confidence = "LOW"
 
-            # Calculate EV against real or synthetic odds
-            best_bet = "-"
-            best_ev = 0.0
-            rec_units = 0.0
-            candidates = []
+                # O/U default
+                real_total_line = 8.5
+                if hasattr(runs_model, 'predict_over_under'):
+                    over_probs, under_probs = runs_model.predict_over_under(feature_df, line=real_total_line)
+                elif hasattr(runs_model, 'predict_total_probs'):
+                    over_probs, under_probs = runs_model.predict_total_probs(feature_df, line=real_total_line)
+                else:
+                    over_probs = np.array([0.5])
+                    under_probs = np.array([0.5])
+                ou_pick = "Over" if float(over_probs[0]) > 0.5 else "Under"
+                ou_prob = float(over_probs[0]) if ou_pick == "Over" else float(under_probs[0])
 
-            # Home ML
-            home_odds_am = odds_info.get("home_ml") or (-150 if home_win_prob > 0.5 else 130)
-            home_dec = american_to_decimal(home_odds_am)
-            home_ev = calculate_ev(home_win_prob, home_dec)
-            if home_ev > 0:
-                kf = fractional_kelly(home_win_prob, home_dec, kelly)
-                units = kelly_to_units(kf, bankroll, unit_size)
-                book = odds_info.get("home_ml_book", "")
-                label = f"{game.home_team.abbreviation} ML"
-                if book:
-                    label += f" ({book})"
-                candidates.append((home_ev, label, units, home_odds_am))
+                # Check for Kalshi edge — pregame odds only (first snapshot captured)
+                kalshi_edge = None
+                kalshi_snaps = session.query(OddsSnapshot).filter(
+                    OddsSnapshot.game_id == game.id,
+                    OddsSnapshot.sportsbook == "kalshi",
+                    OddsSnapshot.market_type == "h2h",
+                ).order_by(OddsSnapshot.captured_at.asc()).first()  # first = pregame
 
-            # Away ML
-            away_odds_am = odds_info.get("away_ml") or (130 if home_win_prob > 0.5 else -150)
-            away_dec = american_to_decimal(away_odds_am)
-            away_ev = calculate_ev(away_win_prob, away_dec)
-            if away_ev > 0:
-                kf = fractional_kelly(away_win_prob, away_dec, kelly)
-                units = kelly_to_units(kf, bankroll, unit_size)
-                book = odds_info.get("away_ml_book", "")
-                label = f"{game.away_team.abbreviation} ML"
-                if book:
-                    label += f" ({book})"
-                candidates.append((away_ev, label, units, away_odds_am))
+                if kalshi_snaps:
+                    kalshi_odds = kalshi_snaps.home_line if pick_side == "home" else kalshi_snaps.away_line
+                    if kalshi_odds is not None:
+                        kalshi_implied = american_to_decimal(kalshi_odds)
+                        kalshi_ev = calculate_ev(pick_prob, kalshi_implied)
+                        if kalshi_ev > 0.02:  # only flag if >2% edge
+                            kalshi_edge = {
+                                "ev": kalshi_ev,
+                                "odds": kalshi_odds,
+                                "model_prob": pick_prob,
+                                "implied_prob": 1 / kalshi_implied,
+                            }
 
-            # Over/Under
-            real_total = odds_info.get("total_line") or 8.5
-            over_odds_am = odds_info.get("over_odds") or -110
-            under_odds_am = odds_info.get("under_odds") or -110
+                    # Also get Kalshi total line if available (pregame)
+                    kalshi_totals = session.query(OddsSnapshot).filter(
+                        OddsSnapshot.game_id == game.id,
+                        OddsSnapshot.sportsbook == "kalshi",
+                        OddsSnapshot.market_type == "totals",
+                    ).order_by(OddsSnapshot.captured_at.asc()).first()  # first = pregame
+                    if kalshi_totals and kalshi_totals.total_line:
+                        real_total_line = kalshi_totals.total_line
+                        # Recompute O/U with Kalshi's line
+                        if hasattr(runs_model, 'predict_over_under'):
+                            over_probs, under_probs = runs_model.predict_over_under(feature_df, line=real_total_line)
+                        elif hasattr(runs_model, 'predict_total_probs'):
+                            over_probs, under_probs = runs_model.predict_total_probs(feature_df, line=real_total_line)
+                        ou_pick = "Over" if float(over_probs[0]) > 0.5 else "Under"
+                        ou_prob = float(over_probs[0]) if ou_pick == "Over" else float(under_probs[0])
 
-            # Recompute O/U with actual line
-            if hasattr(runs_model, 'predict_over_under'):
-                over_probs, under_probs = runs_model.predict_over_under(
-                    feature_df, line=real_total)
-            elif hasattr(runs_model, 'predict_total_probs'):
-                over_probs, under_probs = runs_model.predict_total_probs(
-                    feature_df, line=real_total)
+                time_str = (game.game_time_utc.strftime("%I:%M %p UTC")
+                           if game.game_time_utc else "TBD")
 
-            over_dec = american_to_decimal(over_odds_am)
-            over_ev = calculate_ev(float(over_probs[0]), over_dec)
-            if over_ev > 0:
-                kf = fractional_kelly(float(over_probs[0]), over_dec, kelly)
-                units = kelly_to_units(kf, bankroll, unit_size)
-                book = odds_info.get("over_book", "")
-                label = f"Over {real_total}"
-                if book:
-                    label += f" ({book})"
-                candidates.append((over_ev, label, units, over_odds_am))
+                predictions.append({
+                    "game_id": game.id,
+                    "game_time": time_str,
+                    "away_team": game.away_team.abbreviation,
+                    "home_team": game.home_team.abbreviation,
+                    "away_sp": game.away_sp.name if game.away_sp else "TBD",
+                    "home_sp": game.home_sp.name if game.home_sp else "TBD",
+                    "home_win_prob": home_win_prob,
+                    "away_win_prob": away_win_prob,
+                    "home_runs_pred": home_runs,
+                    "away_runs_pred": away_runs,
+                    "total_pred": total,
+                    "pick_team": pick_team,
+                    "pick_prob": pick_prob,
+                    "confidence": confidence,
+                    "ou_pick": ou_pick,
+                    "ou_prob": ou_prob,
+                    "ou_line": real_total_line,
+                    "kalshi_edge": kalshi_edge,
+                    "status": game.status,
+                    "home_score": game.home_score,
+                    "away_score": game.away_score,
+                })
+            except Exception as e:
+                console.print(f"[yellow]Error predicting {game.away_team.abbreviation} @ {game.home_team.abbreviation}: {e}[/yellow]")
+                continue
 
-            under_dec = american_to_decimal(under_odds_am)
-            under_ev = calculate_ev(float(under_probs[0]), under_dec)
-            if under_ev > 0:
-                kf = fractional_kelly(float(under_probs[0]), under_dec, kelly)
-                units = kelly_to_units(kf, bankroll, unit_size)
-                book = odds_info.get("under_book", "")
-                label = f"Under {real_total}"
-                if book:
-                    label += f" ({book})"
-                candidates.append((under_ev, label, units, under_odds_am))
-
-            # Pick the best EV bet
-            if candidates:
-                candidates.sort(key=lambda x: x[0], reverse=True)
-                best_ev, best_bet, rec_units, _ = candidates[0]
-
-            # Confidence tier
-            if best_ev >= 0.05:
-                tier = "A"
-            elif best_ev >= 0.03:
-                tier = "B"
-            elif best_ev > 0:
-                tier = "C"
-            else:
-                tier = "D"
-
-            time_str = (game.game_time_utc.strftime("%H:%M")
-                       if game.game_time_utc else "TBD")
-
-            predictions.append({
-                "game_id": game.id,
-                "game_time": time_str,
-                "away_team": game.away_team.abbreviation,
-                "home_team": game.home_team.abbreviation,
-                "away_sp": game.away_sp.name if game.away_sp else "TBD",
-                "home_sp": game.home_sp.name if game.home_sp else "TBD",
-                "home_win_prob": home_win_prob,
-                "away_win_prob": away_win_prob,
-                "home_runs_pred": home_runs,
-                "away_runs_pred": away_runs,
-                "total_pred": total,
-                "over_prob": float(over_probs[0]),
-                "under_prob": float(under_probs[0]),
-                "confidence_tier": tier,
-                "recommended_bet": best_bet,
-                "best_ev": best_ev,
-                "recommended_units": rec_units,
-                "home_ml_ev": calculate_ev(home_win_prob, american_to_decimal(-150))
-                              if home_win_prob > 0.5 else 0,
-                "away_ml_ev": calculate_ev(away_win_prob, american_to_decimal(-150))
-                              if away_win_prob > 0.5 else 0,
-            })
-
-        # Sort by confidence tier then EV
-        tier_order = {"A": 0, "B": 1, "C": 2, "D": 3}
-        predictions.sort(key=lambda p: (tier_order.get(p["confidence_tier"], 9),
-                                        -p.get("best_ev", 0)))
+        # Sort by confidence then probability
+        conf_order = {"HIGH": 0, "MED": 1, "LOW": 2}
+        predictions.sort(key=lambda p: (conf_order[p["confidence"]], -p["pick_prob"]))
 
         render_daily_card(predictions, game_date, console)
 
