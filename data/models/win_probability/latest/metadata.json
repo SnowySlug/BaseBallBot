@@ -131,10 +131,10 @@
     "away_bp_pitches_last_3d",
     "away_bp_appearances_7d"
   ],
-  "n_samples": 2423,
+  "n_samples": 82,
   "metrics": {
-    "accuracy": 0.9909203466776723,
-    "log_loss": 0.5749621154979679,
-    "brier_score": 0.191584558851419
+    "accuracy": 0.9634146341463414,
+    "log_loss": 0.33635773299202665,
+    "brier_score": 0.10091559737811494
   }
 }

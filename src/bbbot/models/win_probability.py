@@ -141,7 +141,9 @@ class WinProbabilityModel(BaseModel):
         lgb_probs = self.lgb_model.predict_proba(X_clean)[:, 1]
 
         meta_X = np.column_stack([xgb_probs, lgb_probs])
-        return self.meta_learner.predict_proba(meta_X)[:, 1]
+        probs = self.meta_learner.predict_proba(meta_X)[:, 1]
+        # No game is ever a lock — clip to realistic range
+        return np.clip(probs, 0.05, 0.95)
 
     def get_feature_importance(self) -> pd.Series | None:
         """Return feature importance from XGBoost (gain-based)."""
