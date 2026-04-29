@@ -18,21 +18,23 @@ log = structlog.get_logger()
 MODEL_DIR = Path("data/models")
 
 
-def prepare_training_data(session: Session, season: int) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series]:
-    """Build feature matrix and targets for a season.
+def prepare_training_data(session: Session, season: int | list[int]) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series]:
+    """Build feature matrix and targets for one or more seasons.
 
     Returns (X, y_win, y_home_runs, y_away_runs)
     """
     registry = create_default_registry()
 
-    # Get all completed games for the season
+    seasons = [season] if isinstance(season, int) else season
+
+    # Get all completed games for the season(s)
     games = list(session.query(Game).filter(
-        Game.season == season,
+        Game.season.in_(seasons),
         Game.status == "final",
         Game.home_score.isnot(None),
     ).order_by(Game.game_date).all())
 
-    log.info("preparing_training_data", season=season, games=len(games))
+    log.info("preparing_training_data", seasons=seasons, games=len(games))
 
     rows = []
     targets_win = []
@@ -67,12 +69,13 @@ def prepare_training_data(session: Session, season: int) -> tuple[pd.DataFrame, 
     )
 
 
-def train_win_model(X: pd.DataFrame, y: pd.Series) -> dict:
+def train_win_model(X: pd.DataFrame, y: pd.Series,
+                    tune: bool = False, n_trials: int = 50) -> dict:
     """Train the win probability ensemble model."""
     from bbbot.models.win_probability import WinProbabilityModel
 
     model = WinProbabilityModel()
-    metrics = model.train(X, y)
+    metrics = model.train(X, y, tune=tune, n_trials=n_trials)
 
     # Save
     model_path = MODEL_DIR / "win_probability" / "latest"
@@ -83,7 +86,9 @@ def train_win_model(X: pd.DataFrame, y: pd.Series) -> dict:
     import json
     meta = {
         "model_name": "win_probability",
-        "features": list(X.columns),
+        "features": model.selected_features or list(X.columns),
+        "all_features": len(X.columns),
+        "selected_features": len(model.selected_features or X.columns),
         "n_samples": len(X),
         "metrics": {k: float(v) for k, v in metrics.items()},
     }
@@ -99,12 +104,13 @@ def train_win_model(X: pd.DataFrame, y: pd.Series) -> dict:
     return metrics
 
 
-def train_run_model(X: pd.DataFrame, y_home: pd.Series, y_away: pd.Series) -> dict:
+def train_run_model(X: pd.DataFrame, y_home: pd.Series, y_away: pd.Series,
+                    tune: bool = False, n_trials: int = 50) -> dict:
     """Train the run total model."""
     from bbbot.models.run_total import RunTotalModel
 
     model = RunTotalModel()
-    metrics = model.train(X, y_home, y_away)
+    metrics = model.train(X, y_home, y_away, tune=tune, n_trials=n_trials)
 
     model_path = MODEL_DIR / "run_total" / "latest"
     model_path.mkdir(parents=True, exist_ok=True)
@@ -113,7 +119,9 @@ def train_run_model(X: pd.DataFrame, y_home: pd.Series, y_away: pd.Series) -> di
     import json
     meta = {
         "model_name": "run_total",
-        "features": list(X.columns),
+        "features": model.selected_features or list(X.columns),
+        "all_features": len(X.columns),
+        "selected_features": len(model.selected_features or X.columns),
         "n_samples": len(X),
         "metrics": {k: float(v) for k, v in metrics.items()},
     }
@@ -124,7 +132,7 @@ def train_run_model(X: pd.DataFrame, y_home: pd.Series, y_away: pd.Series) -> di
     return metrics
 
 
-def train_all(season: int) -> dict:
+def train_all(season: int | list[int], tune: bool = False, n_trials: int = 50) -> dict:
     """Train all models for a season. Returns combined metrics."""
     init_db()
     session = get_session()
@@ -138,8 +146,8 @@ def train_all(season: int) -> dict:
                         msg=f"Only {len(X)} samples. Need 50+ for meaningful training.")
             return {"error": "insufficient_data", "samples": len(X)}
 
-        win_metrics = train_win_model(X, y_win)
-        run_metrics = train_run_model(X, y_home, y_away)
+        win_metrics = train_win_model(X, y_win, tune=tune, n_trials=n_trials)
+        run_metrics = train_run_model(X, y_home, y_away, tune=tune, n_trials=n_trials)
 
         return {"win_model": win_metrics, "run_model": run_metrics}
     finally:
